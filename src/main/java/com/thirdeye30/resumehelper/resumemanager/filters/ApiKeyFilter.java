@@ -18,6 +18,11 @@ public class ApiKeyFilter extends OncePerRequestFilter {
 
     @Value("${thirdeye.resume.updater.api.key}")
     private String apiKey;
+    
+    @Value("${spring.profiles.active}")
+    private String profile;
+    
+    
 
     private static final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -37,7 +42,7 @@ public class ApiKeyFilter extends OncePerRequestFilter {
             requestApiKey = request.getParameter("THIRDEYE_RESUME_UPDATER_API_KEY");
         }
 
-        if (apiKey != null && apiKey.equals(requestApiKey)) {
+        if ((apiKey != null && apiKey.equals(requestApiKey)) || profile.equalsIgnoreCase("LOCAL")) {
             filterChain.doFilter(request, response);
         } else {
             sendUnauthorizedResponse(response);

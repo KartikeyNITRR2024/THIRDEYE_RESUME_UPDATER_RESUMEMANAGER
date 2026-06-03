@@ -2,6 +2,9 @@ package com.thirdeye30.resumehelper.resumemanager.services;
 
 import java.util.List;
 import java.util.UUID;
+
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.web.multipart.MultipartFile;
 
 import com.thirdeye30.resumehelper.resumemanager.dtos.DownloadOriginalResumeDto;
@@ -26,4 +29,6 @@ public interface ResumeService {
 	void updateStatusInBatch();
 	void processStaleUpdates();
 	ResumeContentDto getResumeContent(UUID id);
+    Page<ResumeDto> getResumesByEmail(String email, Pageable pageable);
+	ResumeDto finalSubmit(UUID id);
 }

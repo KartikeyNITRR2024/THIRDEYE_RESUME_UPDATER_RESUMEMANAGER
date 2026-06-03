@@ -55,4 +55,10 @@ public class TokenServiceImpl implements TokenService {
         log.info("Requesting subtraction of {} tokens for user {}", amount, userId);
         tokenManager.subtractToken(userId, amount);
     }
+    
+    @Override
+    public void updateNameAndEmail(UUID userId, String name, String email) {
+        log.info("Requesting updating of name and email to {} and {} for user {}", name, email, userId);
+        tokenManager.updateNameAndEmail(userId, name, email);
+    }
 }

@@ -25,7 +25,8 @@ import lombok.NoArgsConstructor;
 @Table(name = "resumes", indexes = {
     @Index(name = "idx_resume_user_id", columnList = "userId"),
     @Index(name = "idx_resume_aws_path_orig", columnList = "awsPathOriginal"),
-    @Index(name = "idx_resume_aws_path_upda", columnList = "awsPathUpdated")
+    @Index(name = "idx_resume_aws_path_upda", columnList = "awsPathUpdated"),
+    @Index(name = "idx_email", columnList = "email")
 })
 @Data
 @NoArgsConstructor

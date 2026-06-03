@@ -13,6 +13,8 @@ import org.springframework.transaction.annotation.Transactional;
 
 import com.thirdeye30.resumehelper.resumemanager.entities.Resume;
 import com.thirdeye30.resumehelper.resumemanager.enums.Status;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 
 @Repository
 public interface ResumeRepository extends JpaRepository<Resume, UUID> {
@@ -25,6 +27,7 @@ public interface ResumeRepository extends JpaRepository<Resume, UUID> {
     Optional<Resume> findByAwsPathUpdated(UUID awsPathUpdated);
 
     List<Resume> findByUserId(UUID userId);
+    Page<Resume> findByEmail(String email, Pageable pageable);
 
     @Transactional
     @Modifying

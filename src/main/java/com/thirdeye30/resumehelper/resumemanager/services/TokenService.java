@@ -6,5 +6,6 @@ public interface TokenService {
 	
 	Long getToken(UUID userid);
 	void subtractToken(UUID userid, Long token);
+	void updateNameAndEmail(UUID userId, String name, String email);
 
 }

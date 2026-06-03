@@ -3,6 +3,8 @@ package com.thirdeye30.resumehelper.resumemanager.controllers;
 import java.util.List;
 import java.util.UUID;
 
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -68,6 +70,14 @@ public class ResumeController {
     public ResponseEntity<List<ResumeDto>> getResumesByUser(@PathVariable UUID userId) {
         return ResponseEntity.ok(resumeService.getResumesByUserId(userId));
     }
+    
+    @GetMapping("/email/{email}")
+    public ResponseEntity<Page<ResumeDto>> getResumesByEmail(
+            @PathVariable String email, 
+            Pageable pageable) {
+        
+        return ResponseEntity.ok(resumeService.getResumesByEmail(email, pageable));
+    }
 
     @GetMapping("/{id}")
     public ResponseEntity<ResumeDto> getResume(@PathVariable UUID id) {
@@ -93,6 +103,11 @@ public class ResumeController {
     public ResponseEntity<Void> updateStatus(@PathVariable UUID id, @RequestParam Status status) {
         resumeService.updateStatus(id, status, null, null, null);
         return ResponseEntity.noContent().build();
+    }
+    
+    @PatchMapping("/{id}/submit")
+    public ResponseEntity<ResumeDto> updateStatus(@PathVariable UUID id) {
+        return ResponseEntity.ok(resumeService.finalSubmit(id));
     }
 
     @PatchMapping("/{id}/processed-path")

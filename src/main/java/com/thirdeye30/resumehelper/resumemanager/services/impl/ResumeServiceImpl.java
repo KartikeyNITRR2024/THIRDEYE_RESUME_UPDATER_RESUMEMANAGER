@@ -17,6 +17,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StreamUtils;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.scheduling.annotation.Async;
 
 import com.thirdeye30.resumehelper.resumemanager.dtos.AlProcesserPayload;
 import com.thirdeye30.resumehelper.resumemanager.dtos.DownloadOriginalResumeDto;
@@ -40,6 +41,9 @@ import com.thirdeye30.resumehelper.resumemanager.dtos.ResumeContentDto;
 import io.awspring.cloud.s3.S3Template;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
 @Service
@@ -53,28 +57,26 @@ public class ResumeServiceImpl implements ResumeService {
     private final TokenService tokenService;
     private final StringRedisTemplate redisTemplate;
     
-
     @Value("${thirdeye.bucket.name}")
     private String bucketName;
 
     @Value("${thirdeye.multimedia.url.starter}")
     private String urlStarter;
-    
-    @Value("${thirdeye.redis.balance-prefix}")
-    private String redisBalancePrefix;
+
+    @Value("${thirdeye.redis.resume-prefix}")
+    private String redisResumePrefix;
 
     @Override
     @Transactional
     public ResumeDto uploadResumePdf(ResumeMetadata metadata, MultipartFile file) {
-    	
-    	Long tokenLeft = tokenService.getToken(metadata.getUserId());
-    	
-    	if(tokenLeft < 2)
-    	{
-    		log.warn("Action blocked: User {} has insufficient tokens ({})", metadata.getUserId(), tokenLeft);
+        
+        Long tokenLeft = tokenService.getToken(metadata.getUserId());
+        
+        if(tokenLeft < 2) {
+            log.warn("Action blocked: User {} has insufficient tokens ({})", metadata.getUserId(), tokenLeft);
             throw new RuntimeException("Insufficient tokens to proceed");
-    	}
-    	
+        }
+        
         log.info("Initiating secure PDF upload for user: {}", metadata.getUserId());
         UUID fileKey = UUID.randomUUID();
         String encKey = generateKey() + "-RE-PDF";
@@ -143,14 +145,11 @@ public class ResumeServiceImpl implements ResumeService {
     public DownloadOriginalResumeDto downloadAndDecrypt(Type type, UUID fileKey) {
         log.info("Request to download and decrypt file: {}", fileKey);
         Resume resume = null;
-        if(type.equals(Type.ORIGINAL))
-        {
-        	resume = resumeRepository.findByAwsPathOriginal(fileKey)
+        if(type.equals(Type.ORIGINAL)) {
+            resume = resumeRepository.findByAwsPathOriginal(fileKey)
                     .orElseThrow(() -> new RuntimeException("Resume file not found in database"));
-        }
-        else
-        {
-        	resume = resumeRepository.findByAwsPathUpdated(fileKey)
+        } else {
+            resume = resumeRepository.findByAwsPathUpdated(fileKey)
                     .orElseThrow(() -> new RuntimeException("Resume updated file not found in database"));
         }
         
@@ -160,7 +159,6 @@ public class ResumeServiceImpl implements ResumeService {
         String fileName;
         String extension;
 
-        // Determine type based on your key suffix logic
         if ((type.equals(Type.ORIGINAL) && resume.getEncryptionkey().endsWith("-RE-TEXT")) || type.equals(Type.UPDATED)) {
             contentType = MediaType.TEXT_PLAIN;
             fileName = fileKey + ".txt";
@@ -172,14 +170,11 @@ public class ResumeServiceImpl implements ResumeService {
         }
         
         try {
-            // 1. Download the ENCRYPTED bytes from S3
             Resource resource = s3Template.download(bucketName, fileKey.toString() + extension);
             byte[] encryptedData = StreamUtils.copyToByteArray(resource.getInputStream());
 
-            // 2. CRITICAL: Decrypt the bytes before sending them to the DTO
             byte[] decryptedData = CryptoUtils.decrypt(encryptedData, type.equals(Type.ORIGINAL) ? resume.getEncryptionkey() : resume.getEncryptionkeyForUpdatedResume());
 
-            // 3. Set the DECRYPTED bytes
             downloadOriginalResumeDto.setBytes(decryptedData); 
             downloadOriginalResumeDto.setContentType(contentType);
             downloadOriginalResumeDto.setFileName(fileName);
@@ -193,10 +188,11 @@ public class ResumeServiceImpl implements ResumeService {
     
     @Override
     public ResumeDto getResumeById(UUID id) {
-    	ResumeDto resumeDto = resumeRepository.findById(id)
+        ResumeDto resumeDto = resumeRepository.findById(id)
                 .map(this::mapToDtoForUser)
                 .orElseThrow(() -> new RuntimeException("Resume not found"));
-    	String dataKey = "resume:buffer:" + id;
+        // UPDATED: Use dynamic prefix
+        String dataKey = redisResumePrefix + "buffer:" + id;
         Map<Object, Object> bufferedData = redisTemplate.opsForHash().entries(dataKey);
         if (!bufferedData.isEmpty()) {
             log.info("Fetching resume {} from Redis buffer", id);
@@ -204,15 +200,16 @@ public class ResumeServiceImpl implements ResumeService {
             resumeDto.setName((String) bufferedData.get("name"));
             resumeDto.setEmail((String) bufferedData.get("email"));
         }
-    	return resumeDto;
+        return resumeDto;
     }
 
     @Override
     public ResumeAdminDto getResumeByIdForAdmin(UUID id) {
-    	ResumeAdminDto resumeDto = resumeRepository.findById(id)
+        ResumeAdminDto resumeDto = resumeRepository.findById(id)
                 .map(this::mapToDtoForAdmin)
                 .orElseThrow(() -> new RuntimeException("Resume not found"));
-    	String dataKey = "resume:buffer:" + id;
+        // UPDATED: Use dynamic prefix
+        String dataKey = redisResumePrefix + "buffer:" + id;
         Map<Object, Object> bufferedData = redisTemplate.opsForHash().entries(dataKey);
         if (!bufferedData.isEmpty()) {
             log.info("Fetching resume {} from Redis buffer", id);
@@ -220,7 +217,7 @@ public class ResumeServiceImpl implements ResumeService {
             resumeDto.setName((String) bufferedData.get("name"));
             resumeDto.setEmail((String) bufferedData.get("email"));
         }
-    	return resumeDto;
+        return resumeDto;
     }
 
     @Override
@@ -228,9 +225,9 @@ public class ResumeServiceImpl implements ResumeService {
         List<ResumeDto> resumeDtos = resumeRepository.findByUserId(userId).stream()
                 .map(this::mapToDtoForUser)
                 .collect(Collectors.toList());
-        for(ResumeDto resumeDto : resumeDtos)
-        {
-        	String dataKey = "resume:buffer:" + resumeDto.getId();
+        for(ResumeDto resumeDto : resumeDtos) {
+            // UPDATED: Use dynamic prefix
+            String dataKey = redisResumePrefix + "buffer:" + resumeDto.getId();
             Map<Object, Object> bufferedData = redisTemplate.opsForHash().entries(dataKey);
             if (!bufferedData.isEmpty()) {
                 log.info("Fetching resume {} from Redis buffer", resumeDto.getId());
@@ -238,18 +235,37 @@ public class ResumeServiceImpl implements ResumeService {
                 resumeDto.setName((String) bufferedData.get("name"));
                 resumeDto.setEmail((String) bufferedData.get("email"));
             }
+            resumeDto.setUpdatedURL(urlStarter+"/pdfgenerater/v1/resumes/"+resumeDto.getId()+"/{PDFTYPE}/download");
         }
         return resumeDtos;
+    }
+    
+    @Override
+    public Page<ResumeDto> getResumesByEmail(String email, Pageable pageable) {
+        Page<Resume> resumePage = resumeRepository.findByEmail(email, pageable);
+        return resumePage.map(resume -> {
+            ResumeDto resumeDto = mapToDtoForUser(resume);
+            String dataKey = redisResumePrefix + "buffer:" + resumeDto.getId();
+            Map<Object, Object> bufferedData = redisTemplate.opsForHash().entries(dataKey);
+            if (!bufferedData.isEmpty()) {
+                log.info("Fetching resume {} from Redis buffer", resumeDto.getId());
+                resumeDto.setStatus(Status.valueOf((String) bufferedData.get("status")));
+                resumeDto.setName((String) bufferedData.get("name"));
+                resumeDto.setEmail((String) bufferedData.get("email"));
+            }
+            resumeDto.setUpdatedURL(urlStarter + "/pdfgenerater/v1/resumes/" + resumeDto.getId() + "/{PDFTYPE}/download");
+            return resumeDto;
+        });
     }
 
     @Override
     public List<ResumeAdminDto> getResumesByUserIdForAdmin(UUID userId) {
-    	List<ResumeAdminDto> resumeDtos = resumeRepository.findByUserId(userId).stream()
+        List<ResumeAdminDto> resumeDtos = resumeRepository.findByUserId(userId).stream()
                 .map(this::mapToDtoForAdmin)
                 .collect(Collectors.toList());
-    	for(ResumeAdminDto resumeDto : resumeDtos)
-        {
-        	String dataKey = "resume:buffer:" + resumeDto.getId();
+        for(ResumeAdminDto resumeDto : resumeDtos) {
+            // UPDATED: Use dynamic prefix
+            String dataKey = redisResumePrefix + "buffer:" + resumeDto.getId();
             Map<Object, Object> bufferedData = redisTemplate.opsForHash().entries(dataKey);
             if (!bufferedData.isEmpty()) {
                 log.info("Fetching resume {} from Redis buffer", resumeDto.getId());
@@ -257,41 +273,16 @@ public class ResumeServiceImpl implements ResumeService {
                 resumeDto.setName((String) bufferedData.get("name"));
                 resumeDto.setEmail((String) bufferedData.get("email"));
             }
+            resumeDto.setUpdatedURL(urlStarter+"/pdfgenerater/v1/resumes/"+resumeDto.getId()+"/{PDFTYPE}/download");
         }
-    	return resumeDtos;
+        return resumeDtos;
     }
-
-//    @Override
-//    @Transactional
-//    public void updateStatus(UUID id, Status status, String name, String email, String content) {
-//        log.info("Updating status for resume {} to {}", id, status);
-//        int updated = 0;
-//        if(status.equals(Status.FAILED) || status.equals(Status.EXTRACTING_TEXT))
-//        {
-//        	updated = resumeRepository.updateStatus(id, status);
-//        }
-//        else
-//        {
-//        	String encKey = generateKey() + "-RE-TEXT";
-//        	UUID fileKey = UUID.randomUUID();
-//            try {
-//                byte[] encryptedData = CryptoUtils.encrypt(content.getBytes(StandardCharsets.UTF_8), encKey);
-//                uploadToS3(fileKey.toString() + ".txt", encryptedData);
-//                updated = resumeRepository.updateResumeDetails(id, status, name, email, fileKey, encKey);
-//            } catch (Exception e) {
-//                log.error("Text Upload failed for resume id: {}", id, e);
-//                updated = resumeRepository.updateStatus(id, Status.FAILED);
-//                throw new RuntimeException("Text Secure Upload Failed", e);
-//            }
-//        	
-//        }
-//        if (updated == 0) throw new RuntimeException("Update failed: Resume not found");
-//    }
     
     @Override
     @Transactional(readOnly = true)
     public ResumeContentDto getResumeContent(UUID id) {
-        String dataKey = "resume:buffer:" + id;
+        // UPDATED: Use dynamic prefix
+        String dataKey = redisResumePrefix + "buffer:" + id;
         Map<Object, Object> bufferedData = redisTemplate.opsForHash().entries(dataKey);
         if (!bufferedData.isEmpty()) {
             log.info("Fetching resume {} from Redis buffer", id);
@@ -321,8 +312,9 @@ public class ResumeServiceImpl implements ResumeService {
     @Transactional
     public void updateStatus(UUID id, Status status, String name, String email, String content) {
         log.info("Buffering update for resume {} in Redis", id);
-        String dataKey = "resume:buffer:" + id;
-        String trackerKey = "resume:update:tracker";
+        // UPDATED: Use dynamic prefix
+        String dataKey = redisResumePrefix + "buffer:" + id;
+        String trackerKey = redisResumePrefix + "update:tracker";
         Map<String, String> data = new HashMap<>();
         data.put("id", id.toString());
         data.put("status", status.name());
@@ -332,18 +324,25 @@ public class ResumeServiceImpl implements ResumeService {
         
         redisTemplate.opsForHash().putAll(dataKey, data);
         redisTemplate.opsForZSet().add(trackerKey, id.toString(), System.currentTimeMillis());
+        try {
+            updateNameAndEmail(id, name, email);
+        } catch(Exception ex) {
+            log.error(ex.getMessage());
+        }
     }
     
     @Override
     @Transactional
     public void processStaleUpdates() {
-        String trackerKey = "resume:update:tracker";
-        long fifteenMinsAgo = System.currentTimeMillis() - (15 * 60 * 1000);
+        // UPDATED: Use dynamic prefix
+        String trackerKey = redisResumePrefix + "update:tracker";
+        long fifteenMinsAgo = System.currentTimeMillis() - (1 * 60 * 1000);
         Set<String> staleIds = redisTemplate.opsForZSet().rangeByScore(trackerKey, 0, fifteenMinsAgo);
         if (staleIds == null || staleIds.isEmpty()) return;
         for (String idStr : staleIds) {
             UUID id = UUID.fromString(idStr);
-            String dataKey = "resume:buffer:" + idStr;
+            // UPDATED: Use dynamic prefix
+            String dataKey = redisResumePrefix + "buffer:" + idStr;
             Map<Object, Object> data = redisTemplate.opsForHash().entries(dataKey);
             if (data.isEmpty()) continue;
 
@@ -356,6 +355,46 @@ public class ResumeServiceImpl implements ResumeService {
             }
         }
         log.info("Successfully uploaded {} stale resumes", staleIds.size());
+    }
+    
+    @Override
+    @Transactional
+    public ResumeDto finalSubmit(UUID id)
+    {
+    	ResumeDto resumeDto = null;
+    	Integer count = 0;
+    	String trackerKey = redisResumePrefix + "update:tracker";
+        String dataKey = redisResumePrefix + "buffer:" + id.toString();
+        Map<Object, Object> data = redisTemplate.opsForHash().entries(dataKey);
+        if (data.isEmpty())
+        {
+        	count = resumeRepository.updateStatus(id, Status.COMPLETED);
+        }
+        else
+        {
+	        try {
+	        	Status status = Status.valueOf((String) data.get("status"));
+	            String name = (String) data.get("name");
+	            String email = (String) data.get("email");
+	            String content = (String) data.get("content");
+	
+	            if (status.equals(Status.FAILED) || status.equals(Status.EXTRACTING_TEXT)) {
+	            	count = resumeRepository.updateStatus(id, status);
+	            } else {
+	                String encKey = generateKey() + "-RE-TEXT";
+	                UUID fileKey = UUID.randomUUID();
+	                byte[] encryptedData = CryptoUtils.encrypt(content.getBytes(StandardCharsets.UTF_8), encKey);
+	                
+	                uploadToS3(fileKey.toString() + ".txt", encryptedData);
+	                count = resumeRepository.updateResumeDetails(id, Status.COMPLETED, name, email, fileKey, encKey);
+	            }
+	            redisTemplate.delete(dataKey);
+	            redisTemplate.opsForZSet().remove(trackerKey, id.toString());
+	        } catch (Exception e) {
+	            log.error("Failed to sync stale resume {} to permanent storage", id, e);
+	        }
+        }
+        return getResumeById(id);
     }
 
     private void finalizeUpload(UUID id, Map<Object, Object> data) throws Exception {
@@ -390,25 +429,31 @@ public class ResumeServiceImpl implements ResumeService {
         }
     }
     
-	@Override
-	public void updateStatusInBatch() {
-	    while(true) {
-	        try {
-	            List<Message<StatusResume>> messages = messageBrokerService.getMessage("statusupdater");
-	            if(messages.isEmpty()) {
-	                break;
-	            }
-	            
-	            for(Message<StatusResume> message : messages) {
-	            	updateStatus(message.getMessage().getResumeId(), message.getMessage().getStatus(), message.getMessage().getName(), message.getMessage().getEmail(), message.getMessage().getUpdatedContent());
-	            		
-	            }
-	        } catch (Exception ex) {
-	            log.error("Error in updste status loop", ex);
-	            break;
-	        }
-	    }
-	}
+    @Override
+    public void updateStatusInBatch() {
+        while(true) {
+            try {
+                List<Message<StatusResume>> messages = messageBrokerService.getMessage("statusupdater");
+                if(messages.isEmpty()) {
+                    break;
+                }
+                
+                for(Message<StatusResume> message : messages) {
+                    updateStatus(message.getMessage().getResumeId(), message.getMessage().getStatus(), message.getMessage().getName(), message.getMessage().getEmail(), message.getMessage().getUpdatedContent());
+                        
+                }
+            } catch (Exception ex) {
+                log.error("Error in update status loop", ex);
+                break;
+            }
+        }
+    }
+    
+    @Async
+    public void updateNameAndEmail(UUID id, String name, String email) {
+        ResumeAdminDto resumeAdminDto = getResumeByIdForAdmin(id);
+        tokenService.updateNameAndEmail(resumeAdminDto.getUserId(), name, email);
+    }
 
 
     private String generateKey() {
@@ -421,17 +466,16 @@ public class ResumeServiceImpl implements ResumeService {
         dto.setStatus(resume.getStatus());
         dto.setCreateTime(resume.getCreateTime());
         dto.setOriginalURL(urlStarter+"/resumemanager/v1/resumes/view/original/"+resume.getAwsPathOriginal());
-        if(resume.getStatus().equals(Status.COMPLETED))
-        {
-        	dto.setUpdatedURL(urlStarter+"/resumemanager/v1/resumes/view/updated/"+resume.getAwsPathUpdated());
-        	dto.setName(resume.getName());
-        	dto.setEmail(resume.getEmail());
+        if(resume.getStatus().equals(Status.COMPLETED)) {
+            dto.setUpdatedURL(urlStarter+"/resumemanager/v1/resumes/view/updated/"+resume.getAwsPathUpdated());
+            dto.setName(resume.getName());
+            dto.setEmail(resume.getEmail());
         }
         return dto;
     }
 
     private ResumeAdminDto mapToDtoForAdmin(Resume resume) {
-    	ResumeAdminDto dto = new ResumeAdminDto();
+        ResumeAdminDto dto = new ResumeAdminDto();
         dto.setId(resume.getId());
         dto.setUserId(resume.getUserId());
         dto.setIsOriginalResumeUploaded(resume.getIsOriginalResumeUploaded());
