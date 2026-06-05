@@ -3,7 +3,9 @@ package com.thirdeye30.resumehelper.resumemanager.services.impl;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -22,6 +24,7 @@ import org.springframework.scheduling.annotation.Async;
 import com.thirdeye30.resumehelper.resumemanager.dtos.AlProcesserPayload;
 import com.thirdeye30.resumehelper.resumemanager.dtos.DownloadOriginalResumeDto;
 import com.thirdeye30.resumehelper.resumemanager.dtos.ResumeDto;
+import com.thirdeye30.resumehelper.resumemanager.dtos.ResumeMailPayload;
 import com.thirdeye30.resumehelper.resumemanager.dtos.ResumeMetadata;
 import com.thirdeye30.resumehelper.resumemanager.dtos.StatusResume;
 import com.thirdeye30.resumehelper.resumemanager.dtos.TextExtracterPayload;
@@ -141,9 +144,78 @@ public class ResumeServiceImpl implements ResumeService {
         }
     }
 
+//    @Override
+//    public DownloadOriginalResumeDto downloadAndDecrypt(Type type, UUID fileKey) {
+//        log.info("Request to download and decrypt file: {}", fileKey);
+//        Resume resume = null;
+//        if(type.equals(Type.ORIGINAL)) {
+//            resume = resumeRepository.findByAwsPathOriginal(fileKey)
+//                    .orElseThrow(() -> new RuntimeException("Resume file not found in database"));
+//        } else {
+//            resume = resumeRepository.findByAwsPathUpdated(fileKey)
+//                    .orElseThrow(() -> new RuntimeException("Resume updated file not found in database"));
+//        }
+//        
+//        DownloadOriginalResumeDto downloadOriginalResumeDto = new DownloadOriginalResumeDto();
+//
+//        MediaType contentType;
+//        String fileName;
+//        String extension;
+//
+//        if ((type.equals(Type.ORIGINAL) && resume.getEncryptionkey().endsWith("-RE-TEXT")) || type.equals(Type.UPDATED)) {
+//            contentType = MediaType.TEXT_PLAIN;
+//            fileName = fileKey + ".txt";
+//            extension = ".txt";
+//        } else {
+//            contentType = MediaType.APPLICATION_PDF;
+//            fileName = fileKey + ".pdf";
+//            extension = ".pdf";
+//        }
+//        
+//        try {
+//            Resource resource = s3Template.download(bucketName, fileKey.toString() + extension);
+//            byte[] encryptedData = StreamUtils.copyToByteArray(resource.getInputStream());
+//
+//            byte[] decryptedData = CryptoUtils.decrypt(encryptedData, type.equals(Type.ORIGINAL) ? resume.getEncryptionkey() : resume.getEncryptionkeyForUpdatedResume());
+//
+//            downloadOriginalResumeDto.setBytes(decryptedData); 
+//            downloadOriginalResumeDto.setContentType(contentType);
+//            downloadOriginalResumeDto.setFileName(fileName);
+//            
+//            return downloadOriginalResumeDto;
+//        } catch (Exception e) {
+//            log.error("Download/Decryption failed for file: {}", fileKey, e);
+//            throw new RuntimeException("Failed to process resume: " + e.getMessage());
+//        }
+//    }
+    
     @Override
     public DownloadOriginalResumeDto downloadAndDecrypt(Type type, UUID fileKey) {
         log.info("Request to download and decrypt file: {}", fileKey);
+        
+        // 1. Define the unique Redis cache key
+        String cacheKey = redisResumePrefix + "file:" + fileKey + ":" + type.name();
+        
+        try {
+            // 2. Check if the file is already cached as a Hash in Redis
+            Map<Object, Object> cachedFile = redisTemplate.opsForHash().entries(cacheKey);
+            if (!cachedFile.isEmpty()) {
+                log.info("Cache hit for file: {} ({})", fileKey, type);
+                DownloadOriginalResumeDto cachedDto = new DownloadOriginalResumeDto();
+                
+                // Decode Base64 string back to original decrypted byte array
+                String base64Bytes = (String) cachedFile.get("bytes");
+                cachedDto.setBytes(java.util.Base64.getDecoder().decode(base64Bytes));
+                cachedDto.setContentType(MediaType.parseMediaType((String) cachedFile.get("contentType")));
+                cachedDto.setFileName((String) cachedFile.get("fileName"));
+                return cachedDto;
+            }
+        } catch (Exception e) {
+            // Fail-silent on cache read errors so S3 fallback still works if Redis has an issue
+            log.error("Redis read failed during download cache check for file: {}", fileKey, e);
+        }
+
+        log.info("Cache miss for file: {}. Fetching from AWS S3.", fileKey);
         Resume resume = null;
         if(type.equals(Type.ORIGINAL)) {
             resume = resumeRepository.findByAwsPathOriginal(fileKey)
@@ -178,6 +250,18 @@ public class ResumeServiceImpl implements ResumeService {
             downloadOriginalResumeDto.setBytes(decryptedData); 
             downloadOriginalResumeDto.setContentType(contentType);
             downloadOriginalResumeDto.setFileName(fileName);
+            try {
+                Map<String, String> cacheData = new LinkedHashMap<>();   
+                cacheData.put("bytes", java.util.Base64.getEncoder().encodeToString(decryptedData));
+                cacheData.put("contentType", contentType.toString());
+                cacheData.put("fileName", fileName);
+                
+                redisTemplate.opsForHash().putAll(cacheKey, cacheData);
+                redisTemplate.expire(cacheKey, java.time.Duration.ofMinutes(15));
+                log.info("Successfully cached file details in Redis for key: {}", fileKey);
+            } catch (Exception cacheEx) {
+                log.error("Failed to write file cache to Redis for key: {}", fileKey, cacheEx);
+            }
             
             return downloadOriginalResumeDto;
         } catch (Exception e) {
@@ -336,7 +420,7 @@ public class ResumeServiceImpl implements ResumeService {
     public void processStaleUpdates() {
         // UPDATED: Use dynamic prefix
         String trackerKey = redisResumePrefix + "update:tracker";
-        long fifteenMinsAgo = System.currentTimeMillis() - (1 * 60 * 1000);
+        long fifteenMinsAgo = System.currentTimeMillis() - (15 * 60 * 1000);
         Set<String> staleIds = redisTemplate.opsForZSet().rangeByScore(trackerKey, 0, fifteenMinsAgo);
         if (staleIds == null || staleIds.isEmpty()) return;
         for (String idStr : staleIds) {
@@ -366,6 +450,7 @@ public class ResumeServiceImpl implements ResumeService {
     	String trackerKey = redisResumePrefix + "update:tracker";
         String dataKey = redisResumePrefix + "buffer:" + id.toString();
         Map<Object, Object> data = redisTemplate.opsForHash().entries(dataKey);
+        Boolean success = false;
         if (data.isEmpty())
         {
         	count = resumeRepository.updateStatus(id, Status.COMPLETED);
@@ -387,14 +472,36 @@ public class ResumeServiceImpl implements ResumeService {
 	                
 	                uploadToS3(fileKey.toString() + ".txt", encryptedData);
 	                count = resumeRepository.updateResumeDetails(id, Status.COMPLETED, name, email, fileKey, encKey);
+	                success = true;
 	            }
 	            redisTemplate.delete(dataKey);
 	            redisTemplate.opsForZSet().remove(trackerKey, id.toString());
+	             
 	        } catch (Exception e) {
 	            log.error("Failed to sync stale resume {} to permanent storage", id, e);
 	        }
         }
-        return getResumeById(id);
+        ResumeDto updateResumeDto = getResumeById(id);
+        
+        if(success)
+        {
+	        Map<String, String> hashMap = new LinkedHashMap<>();
+	        hashMap.put("ORIGINAL", updateResumeDto.getOriginalURL());
+	        hashMap.put("PLAIN_TEXT", updateResumeDto.getUpdatedURL());
+	        hashMap.put("TYPE_1", urlStarter + "/pdfgenerater/v1/resumes/" + updateResumeDto.getId() + "/TYPE_1/download");
+	        hashMap.put("TYPE_2", urlStarter + "/pdfgenerater/v1/resumes/" + updateResumeDto.getId() + "/TYPE_2/download");
+	        hashMap.put("TYPE_3", urlStarter + "/pdfgenerater/v1/resumes/" + updateResumeDto.getId() + "/TYPE_3/download");
+	        ResumeMailPayload resumeMailPayload = new ResumeMailPayload(
+	        		updateResumeDto.getName(),
+	        		updateResumeDto.getEmail(),
+	        		hashMap,
+	        		null,
+	        		updateResumeDto.getCreateTime()
+	        		);
+	        messageBrokerService.sendMessages("mailprocesser", resumeMailPayload);
+	        
+        }
+        return updateResumeDto;
     }
 
     private void finalizeUpload(UUID id, Map<Object, Object> data) throws Exception {
@@ -402,6 +509,8 @@ public class ResumeServiceImpl implements ResumeService {
         String name = (String) data.get("name");
         String email = (String) data.get("email");
         String content = (String) data.get("content");
+        
+        List<ResumeMailPayload> payloads = new ArrayList<>();
 
         if (status.equals(Status.FAILED) || status.equals(Status.EXTRACTING_TEXT)) {
             resumeRepository.updateStatus(id, status);
@@ -412,7 +521,27 @@ public class ResumeServiceImpl implements ResumeService {
             
             uploadToS3(fileKey.toString() + ".txt", encryptedData);
             resumeRepository.updateResumeDetails(id, Status.COMPLETED, name, email, fileKey, encKey);
+            ResumeDto updateResumeDto = getResumeById(id);
+            Map<String, String> hashMap = new HashMap<>();
+	        hashMap.put("ORIGINAL", updateResumeDto.getOriginalURL());
+	        hashMap.put("PLAIN_TEXT", updateResumeDto.getUpdatedURL());
+	        hashMap.put("TYPE_1", urlStarter + "/pdfgenerater/v1/resumes/" + updateResumeDto.getId() + "/TYPE_1/download");
+	        hashMap.put("TYPE_2", urlStarter + "/pdfgenerater/v1/resumes/" + updateResumeDto.getId() + "/TYPE_2/download");
+	        hashMap.put("TYPE_3", urlStarter + "/pdfgenerater/v1/resumes/" + updateResumeDto.getId() + "/TYPE_3/download");
+	        ResumeMailPayload resumeMailPayload = new ResumeMailPayload(
+	        		updateResumeDto.getName(),
+	        		updateResumeDto.getEmail(),
+	        		hashMap,
+	        		null,
+	        		updateResumeDto.getCreateTime()
+	        		);
+	        payloads.add(resumeMailPayload);
         }
+        if(payloads.size() > 0)
+        {
+            messageBrokerService.sendMultipleMessages("mailprocesser", payloads);
+        }
+        
     }
 
     @Override

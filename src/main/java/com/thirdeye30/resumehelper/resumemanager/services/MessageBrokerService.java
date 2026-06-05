@@ -11,5 +11,7 @@ public interface MessageBrokerService {
 
 	List<Message<StatusResume>> getMessage(String topicName);
 
+	void sendMultipleMessages(String topicName, Object messages);
+
 }
 

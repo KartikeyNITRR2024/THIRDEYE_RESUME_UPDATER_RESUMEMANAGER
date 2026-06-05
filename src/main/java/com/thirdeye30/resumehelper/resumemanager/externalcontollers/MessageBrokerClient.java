@@ -30,5 +30,12 @@ public interface MessageBrokerClient {
             @PathVariable("topickey") String topicKey,
             @RequestBody Object messages
     );
+    
+    @PostMapping("/messagebroker/message/multiple/{topicname}/{topickey}")
+    ResponseEntity<String> setMultipleMessages(
+            @PathVariable("topicname") String topicName,
+            @PathVariable("topickey") String topicKey,
+            @RequestBody Object messages
+    );
 }
 
